@@ -4,12 +4,16 @@ import (
 	"archive/tar"
 	"bytes"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -79,7 +83,7 @@ func fixture(t *testing.T) *httptest.Server {
 	tw.Close()
 
 	path := filepath.Join(t.TempDir(), "mb.sqlite")
-	b, err := newBuilder(path)
+	b, err := newBuilder(path, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,4 +218,96 @@ func TestDownloadResumesAndChecks(t *testing.T) {
 	if _, err := os.Stat(bad); !os.IsNotExist(err) {
 		t.Error("a file that failed its checksum was kept")
 	}
+}
+
+// cutAfter stops a reader after n bytes, like a build killed partway.
+type cutAfter struct {
+	r io.Reader
+	n int
+}
+
+func (c *cutAfter) Read(b []byte) (int, error) {
+	if c.n <= 0 {
+		return 0, errors.New("killed")
+	}
+	if len(b) > c.n {
+		b = b[:c.n]
+	}
+	n, err := c.r.Read(b)
+	c.n -= n
+	return n, err
+}
+
+func TestBuildResumesMidTable(t *testing.T) {
+	old := batchRows
+	batchRows = 100
+	defer func() { batchRows = old }()
+
+	// A dump with every table empty but tag: 1000 rows.
+	var rows strings.Builder
+	for i := 1; i <= 1000; i++ {
+		rows.WriteString(row("tag", map[string]string{"id": strconv.Itoa(i), "name": "tag " + strconv.Itoa(i)}))
+	}
+	var dump bytes.Buffer
+	tw := tar.NewWriter(&dump)
+	for _, tbl := range manifest {
+		body := ""
+		if tbl.name == "tag" {
+			body = rows.String()
+		}
+		tw.WriteHeader(&tar.Header{Name: "mbdump/" + tbl.name, Mode: 0o644, Size: int64(len(body))})
+		tw.Write([]byte(body))
+	}
+	tw.Close()
+	tagStart := bytes.Index(dump.Bytes(), []byte("1\ttag 1\t"))
+
+	path := filepath.Join(t.TempDir(), "mb.sqlite.new")
+	b, err := newBuilder(path, "D")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Cut off about 450 rows into the tag table.
+	if err := b.load(&cutAfter{bytes.NewReader(dump.Bytes()), tagStart + len(rows.String())*45/100}); err == nil {
+		t.Fatal("the cut-off load succeeded")
+	}
+	b.db.Close()
+
+	b, err = newBuilder(path, "D")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, done := b.state("tag"); n != 400 || done {
+		t.Fatalf("resumed at %d rows (done %v), want 400 committed", n, done)
+	}
+	if err := b.load(bytes.NewReader(dump.Bytes())); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.finish("D"); err != nil {
+		t.Fatal(err)
+	}
+
+	db, _ := sql.Open("sqlite3", "file:"+path+"?mode=ro&immutable=1")
+	defer db.Close()
+	var count, distinct, maxID int
+	db.QueryRow("SELECT count(*), count(DISTINCT id), max(id) FROM tag").Scan(&count, &distinct, &maxID)
+	if count != 1000 || distinct != 1000 || maxID != 1000 {
+		t.Errorf("tag has %d rows (%d distinct, max id %d), want 1000", count, distinct, maxID)
+	}
+	if _, err := os.Stat(path + "-wal"); err == nil {
+		t.Error("a WAL file was left beside the finished database")
+	}
+	var building string
+	if db.QueryRow("SELECT value FROM meta WHERE key = 'building'").Scan(&building) == nil {
+		t.Error("the finished database still says it's building")
+	}
+
+	// Another dump starts over instead of resuming.
+	b, err = newBuilder(path, "E")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := b.state("tag"); n != 0 {
+		t.Errorf("a different dump resumed at %d rows", n)
+	}
+	b.db.Close()
 }

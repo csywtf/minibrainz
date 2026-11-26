@@ -64,7 +64,7 @@ func main() {
 		if len(os.Args) < 4 {
 			usage()
 		}
-		b, err := newBuilder(os.Args[2])
+		b, err := newBuilder(os.Args[2], filepath.Base(os.Args[3]))
 		if err != nil {
 			log.Fatal(err)
 		}

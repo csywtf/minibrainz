@@ -87,12 +87,19 @@ func (f *refresher) run() (err error) {
 		files = append(files, path)
 	}
 
+	// A build cut off by a restart is resumed; one that fails is discarded.
 	tmp := f.dbPath + ".new"
-	defer os.Remove(tmp)
-	b, err := newBuilder(tmp)
+	b, err := newBuilder(tmp, latest)
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if err != nil {
+			for _, f := range []string{tmp, tmp + "-wal", tmp + "-shm"} {
+				os.Remove(f)
+			}
+		}
+	}()
 	for _, path := range files {
 		if err := b.loadFile(path); err != nil {
 			b.db.Close()
