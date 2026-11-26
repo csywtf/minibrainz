@@ -17,7 +17,7 @@ A subset of `/ws/2`, the requests a music app typically makes:
 | `artist?query=` | Artist search, with a 0–100 `score` |
 | `artist/{mbid}?inc=url-rels+genres` | Artist lookup |
 | `release-group?query=` | Album search |
-| `release-group?artist={mbid}&type=album\|ep\|single` | An artist's albums, all of them (no 100-item pages) |
+| `release-group?artist={mbid}&type=album\|ep\|single` | An artist's albums, up to 1000 a page (musicbrainz.org stops at 100) |
 | `release-group/{mbid}` | Album lookup |
 | `release?release-group={mbid}&inc=media` | An album's releases |
 | `release/{mbid}?inc=recordings+artist-credits+release-groups+labels` | A release with its track list |
@@ -48,8 +48,8 @@ docker run -d -p 8080:8080 -v minibrainz:/data -e MINIBRAINZ_KEY=change-me minib
 curl -H "Authorization: Bearer change-me" "localhost:8080/ws/2/artist?query=bjork"
 ```
 
-The first build starts on launch; until it finishes, requests get 503. `GET /health` reports the
-dump in use.
+The first build starts on launch; until it finishes, requests get 503. `GET /health` always
+answers 200, with `ready` and the dump in use.
 
 | Setting | Default | |
 | --- | --- | --- |

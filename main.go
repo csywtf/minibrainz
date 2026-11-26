@@ -25,7 +25,15 @@ func main() {
 	if len(os.Args) < 2 {
 		usage()
 	}
-	dbPath := filepath.Join(env("MINIBRAINZ_DATA", "data"), "mb.sqlite")
+	dataDir := env("MINIBRAINZ_DATA", "data")
+	dbPath := filepath.Join(dataDir, "mb.sqlite")
+	// Building indexes over tens of millions of rows needs gigabytes of
+	// scratch space: keep it on the data volume, not a small /tmp.
+	if os.Getenv("SQLITE_TMPDIR") == "" {
+		tmp := filepath.Join(dataDir, "tmp")
+		os.MkdirAll(tmp, 0o755)
+		os.Setenv("SQLITE_TMPDIR", tmp)
+	}
 	days, _ := strconv.Atoi(env("MINIBRAINZ_REFRESH_DAYS", "7"))
 	f := &refresher{dumps: env("MINIBRAINZ_DUMPS", defaultDumps), dbPath: dbPath, minAge: time.Duration(days) * 24 * time.Hour}
 

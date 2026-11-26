@@ -13,5 +13,5 @@ COPY --from=build /minibrainz /usr/local/bin/minibrainz
 ENV MINIBRAINZ_DATA=/data
 VOLUME /data
 EXPOSE 8080
-USER 1000
-CMD ["minibrainz", "serve"]
+# An absolute path: some container hosts replace the image environment, PATH included.
+CMD ["/usr/local/bin/minibrainz", "serve"]

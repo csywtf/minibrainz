@@ -74,14 +74,17 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	db, err := s.store.get()
-	if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": err.Error()})
+	if r.URL.Path == "/health" {
+		// Up while the first build runs, so a deploy's health check passes.
+		var dump string
+		if err == nil {
+			db.QueryRow("SELECT value FROM meta WHERE key = 'dump'").Scan(&dump)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"dump": dump, "ready": err == nil})
 		return
 	}
-	if r.URL.Path == "/health" {
-		var dump string
-		db.QueryRow("SELECT value FROM meta WHERE key = 'dump'").Scan(&dump)
-		writeJSON(w, http.StatusOK, map[string]any{"dump": dump})
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": err.Error()})
 		return
 	}
 	q := query{db: db, credits: map[int64][]any{}}
@@ -120,10 +123,15 @@ func (q *query) route(r *http.Request) (any, error) {
 	for _, i := range strings.FieldsFunc(p.Get("inc"), func(r rune) bool { return r == '+' || r == ' ' }) {
 		inc[i] = true
 	}
+	// Searches return at most 100 like musicbrainz.org; browses up to 1000 a page.
 	limit, _ := strconv.Atoi(p.Get("limit"))
-	if limit <= 0 || limit > 100 {
+	if limit <= 0 {
 		limit = 25
 	}
+	browseLimit := min(limit, 1000)
+	limit = min(limit, 100)
+	offset, _ := strconv.Atoi(p.Get("offset"))
+	offset = max(offset, 0)
 	switch {
 	case entity == "artist" && id == "" && p.Has("query"):
 		return q.searchArtists(p.Get("query"), limit)
@@ -132,11 +140,11 @@ func (q *query) route(r *http.Request) (any, error) {
 	case entity == "release-group" && id == "" && p.Has("query"):
 		return q.searchReleaseGroups(p.Get("query"), limit)
 	case entity == "release-group" && id == "" && p.Has("artist"):
-		return q.artistReleaseGroups(p.Get("artist"), p.Get("type"))
+		return q.artistReleaseGroups(p.Get("artist"), p.Get("type"), browseLimit, offset)
 	case entity == "release-group" && id != "":
 		return q.releaseGroup(id)
 	case entity == "release" && id == "" && p.Has("release-group"):
-		return q.releaseGroupReleases(p.Get("release-group"), inc)
+		return q.releaseGroupReleases(p.Get("release-group"), inc, browseLimit, offset)
 	case entity == "release" && id != "":
 		return q.release(id, inc)
 	case entity == "recording" && id != "":
@@ -372,13 +380,17 @@ type ranked struct {
 	result         map[string]any
 }
 
-func sortRanked(r []ranked, limit int) []any {
+func rankOrder(r []ranked) {
 	sort.SliceStable(r, func(i, j int) bool {
 		if r[i].score != r[j].score {
 			return r[i].score > r[j].score
 		}
 		return r[i].popularity > r[j].popularity
 	})
+}
+
+func sortRanked(r []ranked, limit int) []any {
+	rankOrder(r)
 	out := []any{}
 	for i := 0; i < len(r) && i < limit; i++ {
 		r[i].result["score"] = r[i].score
@@ -446,32 +458,40 @@ func (q *query) searchReleaseGroups(text string, limit int) (any, error) {
 	}
 	want := strings.Join(words, " ")
 	rows, err := q.db.Query(`
-		SELECT rg.id FROM (SELECT rowid FROM release_group_fts WHERE release_group_fts MATCH ? ORDER BY rank LIMIT ?) f
-		JOIN release_group rg ON rg.id = f.rowid`, match, searchPool)
+		SELECT rg.id, rg.name, ac.name, coalesce(meta.release_count, 0)
+		FROM (SELECT rowid FROM release_group_fts WHERE release_group_fts MATCH ? ORDER BY rank LIMIT ?) f
+		JOIN release_group rg ON rg.id = f.rowid
+		JOIN artist_credit ac ON ac.id = rg.artist_credit
+		LEFT JOIN release_group_meta meta ON meta.id = rg.id`, match, searchPool)
 	if err != nil {
 		return nil, err
 	}
-	var ids []int64
+	var found []ranked
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
+		var r ranked
+		var title, artist string
+		if err := rows.Scan(&r.id, &title, &artist, &r.popularity); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		ids = append(ids, id)
+		r.score = matchScore(want, title, artist+" "+title, title+" "+artist)
+		found = append(found, r)
 	}
 	rows.Close()
-	var found []ranked
-	for _, id := range ids {
-		g, err := q.releaseGroupByID(id)
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rankOrder(found)
+	if len(found) > limit {
+		found = found[:limit]
+	}
+	for i := range found {
+		g, err := q.releaseGroupByID(found[i].id)
 		if err != nil {
 			return nil, err
 		}
-		artist := g.result["artist-credit-phrase"].(string)
 		delete(g.result, "artist-credit-phrase")
-		title := g.result["title"].(string)
-		g.score = matchScore(want, title, artist+" "+title, title+" "+artist)
-		found = append(found, g)
+		found[i].result = g.result
 	}
 	groups := sortRanked(found, limit)
 	out["release-groups"] = groups
@@ -559,35 +579,41 @@ func (q *query) releaseGroup(id string) (any, error) {
 	return g.result, nil
 }
 
-// artistReleaseGroups browses an artist's release groups. Unlike
-// musicbrainz.org there's no 100-item page: all of them come back.
-func (q *query) artistReleaseGroups(artist, types string) (any, error) {
+// artistReleaseGroups browses an artist's release groups, paged like
+// musicbrainz.org but up to 1000 at a time.
+func (q *query) artistReleaseGroups(artist, types string, limit, offset int) (any, error) {
 	artistID, err := q.idFor("artist", artist)
 	if err != nil {
 		return nil, err
 	}
-	want := map[string]bool{}
+	where := "acn.artist = ?"
+	args := []any{artistID}
+	var want []string
 	for _, t := range strings.Split(strings.ToLower(types), "|") {
 		if t != "" {
-			want[t] = true
+			want = append(want, t)
+			args = append(args, t)
 		}
 	}
-	rows, err := q.db.Query(`
-		SELECT DISTINCT rg.id FROM artist_credit_name acn JOIN release_group rg ON rg.artist_credit = acn.artist_credit
-		WHERE acn.artist = ?`, artistID)
+	if len(want) > 0 {
+		marks := strings.TrimSuffix(strings.Repeat("?,", len(want)), ",")
+		where += ` AND (lower(pt.name) IN (` + marks + `) OR EXISTS (
+			SELECT 1 FROM release_group_secondary_type_join j JOIN release_group_secondary_type st ON st.id = j.secondary_type
+			WHERE j.release_group = rg.id AND lower(st.name) IN (` + marks + `)))`
+		for _, t := range want {
+			args = append(args, t)
+		}
+	}
+	from := `FROM artist_credit_name acn JOIN release_group rg ON rg.artist_credit = acn.artist_credit
+		LEFT JOIN release_group_primary_type pt ON pt.id = rg.type WHERE ` + where
+	var total int
+	if err := q.db.QueryRow("SELECT count(DISTINCT rg.id) "+from, args...).Scan(&total); err != nil {
+		return nil, err
+	}
+	ids, err := q.ids("SELECT DISTINCT rg.id "+from+" ORDER BY rg.id LIMIT ? OFFSET ?", append(args, limit, offset)...)
 	if err != nil {
 		return nil, err
 	}
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	rows.Close()
 	groups := []any{}
 	for _, id := range ids {
 		g, err := q.releaseGroupByID(id)
@@ -595,24 +621,26 @@ func (q *query) artistReleaseGroups(artist, types string) (any, error) {
 			return nil, err
 		}
 		delete(g.result, "artist-credit-phrase")
-		if len(want) > 0 && !typeMatches(g.result, want) {
-			continue
-		}
 		groups = append(groups, g.result)
 	}
-	return map[string]any{"release-groups": groups, "release-group-count": len(groups), "release-group-offset": 0}, nil
+	return map[string]any{"release-groups": groups, "release-group-count": total, "release-group-offset": offset}, nil
 }
 
-func typeMatches(group map[string]any, want map[string]bool) bool {
-	if t, ok := group["primary-type"].(string); ok && want[strings.ToLower(t)] {
-		return true
+func (q *query) ids(sqlText string, args ...any) ([]int64, error) {
+	rows, err := q.db.Query(sqlText, args...)
+	if err != nil {
+		return nil, err
 	}
-	for _, t := range group["secondary-types"].([]string) {
-		if want[strings.ToLower(t)] {
-			return true
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
 		}
+		ids = append(ids, id)
 	}
-	return false
+	return ids, rows.Err()
 }
 
 // --- releases ---
@@ -805,25 +833,19 @@ func (q *query) release(id string, inc map[string]bool) (any, error) {
 	return q.releaseByID(releaseID, inc)
 }
 
-func (q *query) releaseGroupReleases(releaseGroup string, inc map[string]bool) (any, error) {
+func (q *query) releaseGroupReleases(releaseGroup string, inc map[string]bool, limit, offset int) (any, error) {
 	rgID, err := q.idFor("release_group", releaseGroup)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := q.db.Query("SELECT id FROM release WHERE release_group = ? ORDER BY id", rgID)
+	var total int
+	if err := q.db.QueryRow("SELECT count(*) FROM release WHERE release_group = ?", rgID).Scan(&total); err != nil {
+		return nil, err
+	}
+	ids, err := q.ids("SELECT id FROM release WHERE release_group = ? ORDER BY id LIMIT ? OFFSET ?", rgID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	rows.Close()
 	releases := []any{}
 	for _, id := range ids {
 		r, err := q.releaseByID(id, map[string]bool{"media": inc["media"], "artist-credits": inc["artist-credits"], "labels": inc["labels"]})
@@ -832,7 +854,7 @@ func (q *query) releaseGroupReleases(releaseGroup string, inc map[string]bool) (
 		}
 		releases = append(releases, r)
 	}
-	return map[string]any{"releases": releases, "release-count": len(releases), "release-offset": 0}, nil
+	return map[string]any{"releases": releases, "release-count": total, "release-offset": offset}, nil
 }
 
 func (q *query) recording(id string) (any, error) {
