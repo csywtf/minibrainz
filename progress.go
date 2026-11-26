@@ -18,6 +18,19 @@ type buildProgress struct {
 	total     int64
 	started   time.Time
 	lastError string
+	nextCheck time.Time
+}
+
+func (p *buildProgress) setNext(t time.Time) {
+	p.mu.Lock()
+	p.nextCheck = t
+	p.mu.Unlock()
+}
+
+func (p *buildProgress) isRunning() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.running
 }
 
 func (p *buildProgress) set(step string, done, total int64) {
@@ -62,6 +75,9 @@ func (p *buildProgress) report() map[string]any {
 	}
 	if p.lastError != "" {
 		out["last_error"] = p.lastError
+	}
+	if !p.nextCheck.IsZero() {
+		out["next_check"] = p.nextCheck.UTC().Format(time.RFC3339)
 	}
 	return out
 }

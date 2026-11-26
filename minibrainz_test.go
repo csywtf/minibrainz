@@ -311,3 +311,46 @@ func TestBuildResumesMidTable(t *testing.T) {
 	}
 	b.db.Close()
 }
+
+func TestAdmin(t *testing.T) {
+	s := fixture(t)
+	status := get(t, s, "/admin/status", 200)
+	if status["ready"] != true || status["dump_in_use"] != "test" || status["counts"].(map[string]any)["release_group"] != float64(2) {
+		t.Errorf("status: %s", asJSON(status))
+	}
+
+	srv := s.Config.Handler.(*server)
+	srv.refresher = &refresher{trigger: make(chan bool, 1)}
+	post := func(path string) int {
+		req, _ := http.NewRequest("POST", s.URL+path, nil)
+		req.Header.Set("Authorization", "Bearer secret")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := post("/admin/refresh?force=1"); code != 202 {
+		t.Fatalf("refresh: %d", code)
+	}
+	if force := <-srv.refresher.trigger; !force {
+		t.Error("force wasn't passed on")
+	}
+	post("/admin/refresh")
+	if code := post("/admin/refresh"); code != 409 {
+		t.Errorf("a second waiting refresh: %d, want 409", code)
+	}
+
+	// Only this machine, or the admin key, may control it.
+	remote := httptest.NewRequest("POST", "/admin/refresh", nil)
+	remote.RemoteAddr = "192.168.1.22:51000"
+	if srv.adminAllowed(remote) {
+		t.Error("a remote request without the admin key was allowed")
+	}
+	srv.adminKey = "admin-secret"
+	remote.Header.Set("X-Admin-Key", "admin-secret")
+	if !srv.adminAllowed(remote) {
+		t.Error("the admin key wasn't accepted")
+	}
+}

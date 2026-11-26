@@ -6,6 +6,7 @@ import (
 	"compress/bzip2"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -333,7 +334,12 @@ func (b *builder) finish(dump string) error {
 			return fmt.Errorf("%s: %w", s, err)
 		}
 	}
-	_, err := b.db.Exec("INSERT INTO meta VALUES ('dump', ?), ('built', ?)", dump, time.Now().UTC().Format(time.RFC3339))
+	rows, err := counts(b.db)
+	if err != nil {
+		return err
+	}
+	counted, _ := json.Marshal(rows)
+	_, err = b.db.Exec("INSERT INTO meta VALUES ('dump', ?), ('built', ?), ('counts', ?)", dump, time.Now().UTC().Format(time.RFC3339), string(counted))
 	return err
 }
 

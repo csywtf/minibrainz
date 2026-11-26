@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"sort"
@@ -60,8 +61,10 @@ func (s *store) get() (*sql.DB, error) {
 }
 
 type server struct {
-	store *store
-	key   string
+	store     *store
+	key       string
+	adminKey  string     // lets POST /admin/* come from another machine
+	refresher *refresher // nil outside `serve`
 }
 
 type notFound struct{}
@@ -74,6 +77,10 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	db, err := s.store.get()
+	if strings.HasPrefix(r.URL.Path, "/admin/") {
+		s.admin(w, r, db)
+		return
+	}
 	if r.URL.Path == "/health" {
 		// Up while the first build runs, so a deploy's health check passes.
 		var dump string
@@ -875,4 +882,76 @@ func (q *query) recording(id string) (any, error) {
 		return nil, err
 	}
 	return map[string]any{"id": formatMBID(gid), "title": name, "disambiguation": comment, "length": nullInt(length), "video": video}, nil
+}
+
+// --- admin ---
+
+// admin serves GET /admin/status (anyone who may use the API) and POST
+// /admin/refresh (this machine, or MINIBRAINZ_ADMIN_KEY).
+func (s *server) admin(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+	switch {
+	case r.URL.Path == "/admin/status" && r.Method == http.MethodGet:
+		writeJSON(w, http.StatusOK, s.status(db))
+	case r.URL.Path == "/admin/refresh" && r.Method == http.MethodPost:
+		if !s.adminAllowed(r) {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "Admin requests come from this machine or carry the admin key"})
+			return
+		}
+		if s.refresher == nil || s.refresher.trigger == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "Not serving"})
+			return
+		}
+		if progress.isRunning() {
+			writeJSON(w, http.StatusConflict, map[string]any{"error": "A build is already running"})
+			return
+		}
+		force := r.URL.Query().Get("force") == "1" || r.URL.Query().Get("force") == "true"
+		if !s.refresher.request(force) {
+			writeJSON(w, http.StatusConflict, map[string]any{"error": "A check is already waiting"})
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]any{"requested": true, "force": force})
+	default:
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "Not Found"})
+	}
+}
+
+func (s *server) adminAllowed(r *http.Request) bool {
+	if s.adminKey != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Admin-Key")), []byte(s.adminKey)) == 1 {
+		return true
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// status is everything the admin screen shows: the copy in use, the build in
+// progress (if any), and when the next check is.
+func (s *server) status(db *sql.DB) map[string]any {
+	out := progress.report()
+	out["ready"] = db != nil
+	if db != nil {
+		meta := map[string]string{}
+		if rows, err := db.Query("SELECT key, value FROM meta"); err == nil {
+			for rows.Next() {
+				var k, v string
+				if rows.Scan(&k, &v) == nil {
+					meta[k] = v
+				}
+			}
+			rows.Close()
+		}
+		out["dump_in_use"], out["built"] = meta["dump"], meta["built"]
+		var rowCounts map[string]int64
+		if json.Unmarshal([]byte(meta["counts"]), &rowCounts) == nil {
+			out["counts"] = rowCounts
+		}
+		if info, err := os.Stat(s.store.path); err == nil {
+			out["size_bytes"] = info.Size()
+		}
+	}
+	return out
 }

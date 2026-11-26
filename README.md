@@ -60,12 +60,23 @@ leaves `last_error`. Dump files are downloaded beside the database first and kep
 build succeeds, so a restart resumes the download where it stopped and only the import (the
 larger part of the time) starts over. Allow about 8 GB for them on top of two database copies.
 
+### Admin API
+
+| Request | |
+| --- | --- |
+| `GET /admin/status` | The copy in use (dump, build time, size, row counts), a build in progress, the last error and the next scheduled check |
+| `POST /admin/refresh` | Check for a newer dump now and build it; `?force=1` rebuilds even if the copy is current. 409 while a build runs |
+
+`POST /admin/*` is accepted only from the same machine, or with an `X-Admin-Key` header matching
+`MINIBRAINZ_ADMIN_KEY`, so an app running beside minibrainz can control it without a key.
+
 | Setting | Default | |
 | --- | --- | --- |
 | `MINIBRAINZ_DATA` | `/data` in Docker | Folder holding `mb.sqlite` |
 | `MINIBRAINZ_ADDR` | `:8080` | Listen address |
 | `MINIBRAINZ_KEY` | none | If set, requests need `Authorization: Bearer <key>` |
-| `MINIBRAINZ_REFRESH` | `on` | `off` to never rebuild while serving |
+| `MINIBRAINZ_ADMIN_KEY` | none | Lets `POST /admin/*` come from another machine |
+| `MINIBRAINZ_REFRESH` | `on` | `off` to rebuild only when asked through `POST /admin/refresh` |
 | `MINIBRAINZ_REFRESH_DAYS` | `7` | Minimum days between rebuilds |
 | `MINIBRAINZ_DUMPS` | MetaBrainz full export | Base URL of the dumps |
 

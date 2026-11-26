@@ -30,6 +30,48 @@ type refresher struct {
 	dumps  string // base URL
 	dbPath string
 	minAge time.Duration // don't rebuild a database younger than this
+	// Set while serving: a check asked for through the admin API (true
+	// forces a rebuild of the copy in use).
+	trigger chan bool
+}
+
+// loop checks for a new dump every 6 hours (when auto) and whenever one is
+// asked for. A failure (often the network not up yet at boot) is retried in
+// 10 minutes.
+func (f *refresher) loop(auto bool) {
+	check, force := auto, false
+	for {
+		var timer <-chan time.Time
+		if check {
+			wait := 6 * time.Hour
+			if err := f.run(force); err != nil {
+				log.Printf("refresh failed, keeping the current copy: %v", err)
+				progress.end(err)
+				wait = 10 * time.Minute
+			}
+			if auto {
+				progress.setNext(time.Now().Add(wait))
+				timer = time.After(wait)
+			}
+		}
+		select {
+		case <-timer:
+			check, force = true, false
+		case force = <-f.trigger:
+			check = true
+		}
+	}
+}
+
+// request asks the loop for a check now (force: rebuild even if current);
+// false if one is already waiting.
+func (f *refresher) request(force bool) bool {
+	select {
+	case f.trigger <- force:
+		return true
+	default:
+		return false
+	}
 }
 
 func currentDump(path string) (dump string, built time.Time) {
@@ -53,7 +95,7 @@ func currentDump(path string) (dump string, built time.Time) {
 // database, and kept until the build succeeds: a restart resumes a download
 // where it stopped and skips files already checked, so only the import
 // itself starts over.
-func (f *refresher) run() (err error) {
+func (f *refresher) run(force bool) (err error) {
 	latest, err := fetchText(f.dumps + "/LATEST")
 	if err != nil {
 		return err
@@ -64,7 +106,7 @@ func (f *refresher) run() (err error) {
 		return fmt.Errorf("unexpected dump name %q", latest)
 	}
 	dump, built := currentDump(f.dbPath)
-	if _, err := os.Stat(f.dbPath); err == nil && (dump == latest || time.Since(built) < f.minAge) {
+	if _, err := os.Stat(f.dbPath); err == nil && !force && (dump == latest || time.Since(built) < f.minAge) {
 		return nil
 	}
 	log.Printf("building from dump %s", latest)

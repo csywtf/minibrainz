@@ -40,28 +40,14 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		os.MkdirAll(filepath.Dir(dbPath), 0o755)
-		if env("MINIBRAINZ_REFRESH", "on") == "on" {
-			go func() {
-				for {
-					// A failure (often the network not up yet at boot) is retried in
-					// 10 minutes, not at the next 6-hourly check.
-					wait := 6 * time.Hour
-					if err := f.run(); err != nil {
-						log.Printf("refresh failed, keeping the current copy: %v", err)
-						progress.end(err)
-						wait = 10 * time.Minute
-					}
-					time.Sleep(wait)
-				}
-			}()
-		}
+		f.trigger = make(chan bool, 1)
+		go f.loop(env("MINIBRAINZ_REFRESH", "on") == "on")
 		addr := env("MINIBRAINZ_ADDR", ":8080")
 		log.Printf("listening on %s", addr)
-		s := &server{store: &store{path: dbPath}, key: os.Getenv("MINIBRAINZ_KEY")}
+		s := &server{store: &store{path: dbPath}, key: os.Getenv("MINIBRAINZ_KEY"), adminKey: os.Getenv("MINIBRAINZ_ADMIN_KEY"), refresher: f}
 		log.Fatal(http.ListenAndServe(addr, s))
 	case "refresh":
-		f.minAge = 0
-		if err := f.run(); err != nil {
+		if err := f.run(true); err != nil {
 			log.Fatal(err)
 		}
 	case "import":
@@ -96,6 +82,7 @@ settings (environment):
   MINIBRAINZ_DATA          folder holding mb.sqlite (default ./data)
   MINIBRAINZ_ADDR          listen address (default :8080)
   MINIBRAINZ_KEY           if set, requests need "Authorization: Bearer <key>"
+  MINIBRAINZ_ADMIN_KEY     lets POST /admin/* come from elsewhere than this machine
   MINIBRAINZ_REFRESH       "off" to never rebuild while serving (default on)
   MINIBRAINZ_REFRESH_DAYS  minimum days between rebuilds (default 7)
   MINIBRAINZ_DUMPS         dump base URL (default the MetaBrainz full export)`)
