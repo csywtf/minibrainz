@@ -321,9 +321,11 @@ func TestAdmin(t *testing.T) {
 
 	srv := s.Config.Handler.(*server)
 	srv.refresher = &refresher{trigger: make(chan bool, 1)}
+	srv.adminKey = "admin-secret"
 	post := func(path string) int {
 		req, _ := http.NewRequest("POST", s.URL+path, nil)
 		req.Header.Set("Authorization", "Bearer secret")
+		req.Header.Set("X-Admin-Key", "admin-secret")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -342,15 +344,27 @@ func TestAdmin(t *testing.T) {
 		t.Errorf("a second waiting refresh: %d, want 409", code)
 	}
 
-	// Only this machine, or the admin key, may control it.
-	remote := httptest.NewRequest("POST", "/admin/refresh", nil)
-	remote.RemoteAddr = "192.168.1.22:51000"
-	if srv.adminAllowed(remote) {
-		t.Error("a remote request without the admin key was allowed")
+	// Only the admin key controls it, wherever the request comes from.
+	local := httptest.NewRequest("POST", "/admin/refresh", nil)
+	local.RemoteAddr = "127.0.0.1:51000"
+	if srv.adminAllowed(local) {
+		t.Error("a request without the admin key was allowed")
 	}
-	srv.adminKey = "admin-secret"
-	remote.Header.Set("X-Admin-Key", "admin-secret")
-	if !srv.adminAllowed(remote) {
-		t.Error("the admin key wasn't accepted")
+	local.Header.Set("X-Admin-Key", "wrong")
+	if srv.adminAllowed(local) {
+		t.Error("a wrong admin key was accepted")
+	}
+
+	// Without a configured key, one is generated once and kept.
+	path := filepath.Join(t.TempDir(), "admin-key")
+	first, err := loadAdminKey("", path)
+	if err != nil || len(first) != 64 {
+		t.Fatalf("generated key %q: %v", first, err)
+	}
+	if again, _ := loadAdminKey("", path); again != first {
+		t.Error("the saved key wasn't reused")
+	}
+	if info, _ := os.Stat(path); info.Mode().Perm() != 0o600 {
+		t.Errorf("key file mode %v", info.Mode().Perm())
 	}
 }

@@ -67,15 +67,16 @@ larger part of the time) starts over. Allow about 8 GB for them on top of two da
 | `GET /admin/status` | The copy in use (dump, build time, size, row counts), a build in progress, the last error and the next scheduled check |
 | `POST /admin/refresh` | Check for a newer dump now and build it; `?force=1` rebuilds even if the copy is current. 409 while a build runs |
 
-`POST /admin/*` is accepted only from the same machine, or with an `X-Admin-Key` header matching
-`MINIBRAINZ_ADMIN_KEY`, so an app running beside minibrainz can control it without a key.
+`POST /admin/*` needs an `X-Admin-Key` header: `MINIBRAINZ_ADMIN_KEY`, or if that's unset, the
+key minibrainz generates on first start and keeps in `MINIBRAINZ_DATA/admin-key` (readable only
+by its user), so an app beside it can read it from there.
 
 | Setting | Default | |
 | --- | --- | --- |
 | `MINIBRAINZ_DATA` | `/data` in Docker | Folder holding `mb.sqlite` |
 | `MINIBRAINZ_ADDR` | `:8080` | Listen address |
 | `MINIBRAINZ_KEY` | none | If set, requests need `Authorization: Bearer <key>` |
-| `MINIBRAINZ_ADMIN_KEY` | none | Lets `POST /admin/*` come from another machine |
+| `MINIBRAINZ_ADMIN_KEY` | generated | Key for `POST /admin/*` (`X-Admin-Key`); generated into `admin-key` if unset |
 | `MINIBRAINZ_REFRESH` | `on` | `off` to rebuild only when asked through `POST /admin/refresh` |
 | `MINIBRAINZ_REFRESH_DAYS` | `7` | Minimum days between rebuilds |
 | `MINIBRAINZ_DUMPS` | MetaBrainz full export | Base URL of the dumps |

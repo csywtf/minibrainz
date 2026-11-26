@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"sort"
@@ -63,7 +62,7 @@ func (s *store) get() (*sql.DB, error) {
 type server struct {
 	store     *store
 	key       string
-	adminKey  string     // lets POST /admin/* come from another machine
+	adminKey  string     // required (X-Admin-Key) for POST /admin/*
 	refresher *refresher // nil outside `serve`
 }
 
@@ -887,14 +886,14 @@ func (q *query) recording(id string) (any, error) {
 // --- admin ---
 
 // admin serves GET /admin/status (anyone who may use the API) and POST
-// /admin/refresh (this machine, or MINIBRAINZ_ADMIN_KEY).
+// /admin/refresh (with the admin key).
 func (s *server) admin(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	switch {
 	case r.URL.Path == "/admin/status" && r.Method == http.MethodGet:
 		writeJSON(w, http.StatusOK, s.status(db))
 	case r.URL.Path == "/admin/refresh" && r.Method == http.MethodPost:
 		if !s.adminAllowed(r) {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "Admin requests come from this machine or carry the admin key"})
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "Admin requests need the X-Admin-Key header"})
 			return
 		}
 		if s.refresher == nil || s.refresher.trigger == nil {
@@ -916,16 +915,11 @@ func (s *server) admin(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	}
 }
 
+// adminAllowed needs the key in a custom header: not trusting the caller's
+// address keeps a reverse proxy on the same machine, or a web page making
+// cross-site requests, from controlling it.
 func (s *server) adminAllowed(r *http.Request) bool {
-	if s.adminKey != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Admin-Key")), []byte(s.adminKey)) == 1 {
-		return true
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return false
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return s.adminKey != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Admin-Key")), []byte(s.adminKey)) == 1
 }
 
 // status is everything the admin screen shows: the copy in use, the build in

@@ -3,12 +3,15 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -44,7 +47,11 @@ func main() {
 		go f.loop(env("MINIBRAINZ_REFRESH", "on") == "on")
 		addr := env("MINIBRAINZ_ADDR", ":8080")
 		log.Printf("listening on %s", addr)
-		s := &server{store: &store{path: dbPath}, key: os.Getenv("MINIBRAINZ_KEY"), adminKey: os.Getenv("MINIBRAINZ_ADMIN_KEY"), refresher: f}
+		adminKey, err := loadAdminKey(os.Getenv("MINIBRAINZ_ADMIN_KEY"), filepath.Join(dataDir, "admin-key"))
+		if err != nil {
+			log.Fatal(err)
+		}
+		s := &server{store: &store{path: dbPath}, key: os.Getenv("MINIBRAINZ_KEY"), adminKey: adminKey, refresher: f}
 		log.Fatal(http.ListenAndServe(addr, s))
 	case "refresh":
 		if err := f.run(true); err != nil {
@@ -82,9 +89,30 @@ settings (environment):
   MINIBRAINZ_DATA          folder holding mb.sqlite (default ./data)
   MINIBRAINZ_ADDR          listen address (default :8080)
   MINIBRAINZ_KEY           if set, requests need "Authorization: Bearer <key>"
-  MINIBRAINZ_ADMIN_KEY     lets POST /admin/* come from elsewhere than this machine
+  MINIBRAINZ_ADMIN_KEY     key for POST /admin/* (X-Admin-Key header); if unset, one is
+                           generated and kept in MINIBRAINZ_DATA/admin-key
   MINIBRAINZ_REFRESH       "off" to never rebuild while serving (default on)
   MINIBRAINZ_REFRESH_DAYS  minimum days between rebuilds (default 7)
   MINIBRAINZ_DUMPS         dump base URL (default the MetaBrainz full export)`)
 	os.Exit(2)
+}
+
+// loadAdminKey returns the configured admin key, or the one saved at path,
+// generating and saving one (readable only by this user) the first time.
+func loadAdminKey(configured, path string) (string, error) {
+	if configured != "" {
+		return configured, nil
+	}
+	if b, err := os.ReadFile(path); err == nil && len(strings.TrimSpace(string(b))) >= 32 {
+		return strings.TrimSpace(string(b)), nil
+	}
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	key := hex.EncodeToString(raw)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", err
+	}
+	return key, os.WriteFile(path, []byte(key+"\n"), 0o600)
 }
