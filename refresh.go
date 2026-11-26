@@ -12,12 +12,16 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
 
 // The full export, published twice a week.
 const defaultDumps = "https://data.metabrainz.org/pub/musicbrainz/data/fullexport"
+
+// Dump names look like 20261125-002239.
+var dumpName = regexp.MustCompile(`^[0-9]{8}-[0-9]{6}$`)
 
 // Files streamed from each export; together they hold every table in manifest.
 var dumpFiles = []string{"mbdump.tar.bz2", "mbdump-derived.tar.bz2"}
@@ -55,6 +59,10 @@ func (f *refresher) run() (err error) {
 		return err
 	}
 	latest = strings.TrimSpace(latest)
+	// It names a folder that's later deleted, so take only the dump-name shape.
+	if !dumpName.MatchString(latest) {
+		return fmt.Errorf("unexpected dump name %q", latest)
+	}
 	dump, built := currentDump(f.dbPath)
 	if _, err := os.Stat(f.dbPath); err == nil && (dump == latest || time.Since(built) < f.minAge) {
 		return nil
