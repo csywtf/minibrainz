@@ -80,7 +80,9 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			db.QueryRow("SELECT value FROM meta WHERE key = 'dump'").Scan(&dump)
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"dump": dump, "ready": err == nil})
+		status := progress.report()
+		status["dump_in_use"], status["ready"] = dump, err == nil
+		writeJSON(w, http.StatusOK, status)
 		return
 	}
 	if err != nil {

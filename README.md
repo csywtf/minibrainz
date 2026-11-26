@@ -31,7 +31,7 @@ matches first, then by popularity (for now, how many releases an album has).
 The copy holds artists (with aliases), artist credits, release groups, releases (barcode, date,
 country, label), mediums, tracks, recordings, artist links and genres: about 12 GB. It is built
 from `mbdump.tar.bz2` and `mbdump-derived.tar.bz2`, streamed straight from the MetaBrainz
-mirror, so nothing but the database is written to disk. Each download is checked against the
+mirror. Each download is checked against the
 published SHA-256 sums, and a new build only replaces the old one if it looks complete.
 
 Dumps come out twice a week; the server checks every six hours and rebuilds once the copy is a
@@ -49,7 +49,17 @@ curl -H "Authorization: Bearer change-me" "localhost:8080/ws/2/artist?query=bjor
 ```
 
 The first build starts on launch; until it finishes, requests get 503. `GET /health` always
-answers 200, with `ready` and the dump in use.
+answers 200 and shows what's happening:
+
+```json
+{"ready": false, "building": true, "dump": "20261125-002239", "step": "loading track",
+ "percent": 62, "started": "2026-11-26T07:00:00Z", "dump_in_use": ""}
+```
+
+`percent` is through the current file (downloading, checking, then loading); a failed build
+leaves `last_error`. Dump files are downloaded beside the database first and kept until the
+build succeeds, so a restart resumes the download where it stopped and only the import (the
+larger part of the time) starts over. Allow about 8 GB for them on top of two database copies.
 
 | Setting | Default | |
 | --- | --- | --- |

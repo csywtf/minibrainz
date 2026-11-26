@@ -3,12 +3,16 @@ package main
 import (
 	"archive/tar"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // row writes one dump line for a table, with \N for columns not given.
@@ -173,5 +177,41 @@ func TestMatchScore(t *testing.T) {
 		if got := matchScore(c.want, c.names...); got != c.score {
 			t.Errorf("matchScore(%q, %v) = %d, want %d", c.want, c.names, got, c.score)
 		}
+	}
+}
+
+func TestDownloadResumesAndChecks(t *testing.T) {
+	body := bytes.Repeat([]byte("musicbrainz "), 10000)
+	var ranges []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ranges = append(ranges, r.Header.Get("Range"))
+		http.ServeContent(w, r, "dump", time.Time{}, bytes.NewReader(body))
+	}))
+	defer srv.Close()
+	sum := sha256.Sum256(body)
+	want := hex.EncodeToString(sum[:])
+
+	path := filepath.Join(t.TempDir(), "dumps", "x", "mbdump.tar.bz2")
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	os.WriteFile(path, body[:5000], 0o644) // a download cut off by a restart
+	if err := download(srv.URL, path, want); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(path); !bytes.Equal(got, body) {
+		t.Fatalf("resumed file is %d bytes, want %d", len(got), len(body))
+	}
+	if ranges[0] != "bytes=5000-" {
+		t.Errorf("didn't resume: Range %q", ranges[0])
+	}
+	if err := download(srv.URL, path, want); err != nil || len(ranges) != 1 {
+		t.Errorf("a checked file was fetched again (%v, %d requests)", err, len(ranges))
+	}
+
+	bad := filepath.Join(filepath.Dir(path), "other.tar.bz2")
+	if err := download(srv.URL, bad, strings.Repeat("0", 64)); err == nil {
+		t.Fatal("a checksum mismatch passed")
+	}
+	if _, err := os.Stat(bad); !os.IsNotExist(err) {
+		t.Error("a file that failed its checksum was kept")
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -67,6 +68,11 @@ func (b *builder) load(r io.Reader) error {
 		if !ok || !strings.HasPrefix(h.Name, "mbdump/") {
 			continue
 		}
+		progress.mu.Lock()
+		if progress.running {
+			progress.step = "loading " + t.name
+		}
+		progress.mu.Unlock()
 		start := time.Now()
 		n, err := b.loadTable(t, tr)
 		if err != nil {
@@ -229,7 +235,10 @@ func (b *builder) loadFile(path string) error {
 		return err
 	}
 	defer f.Close()
-	r, wait, err := decompress(path, f)
+	if info, err := f.Stat(); err == nil {
+		progress.set("loading "+filepath.Base(path), 0, info.Size())
+	}
+	r, wait, err := decompress(path, counting{f})
 	if err != nil {
 		return err
 	}
