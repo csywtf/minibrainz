@@ -108,7 +108,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // query answers one request in musicbrainz.org's /ws/2 JSON shape, for the
-// requests apollod makes. Anything else is a 404, so callers fall back to
+// requests a music app typically makes. Anything else is a 404, so callers fall back to
 // musicbrainz.org.
 type query struct {
 	db      *sql.DB
