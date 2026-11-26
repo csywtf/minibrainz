@@ -30,9 +30,8 @@ matches first, then by popularity (for now, how many releases an album has).
 
 The copy holds artists (with aliases), artist credits, release groups, releases (barcode, date,
 country, label), mediums, tracks, recordings, artist links and genres: about 12 GB. It is built
-from `mbdump.tar.bz2` and `mbdump-derived.tar.bz2`, streamed straight from the MetaBrainz
-mirror. Each download is checked against the
-published SHA-256 sums, and a new build only replaces the old one if it looks complete.
+from `mbdump.tar.bz2` and `mbdump-derived.tar.bz2` (about 7.5 GB together) from the MetaBrainz
+mirror. Each download is checked against the published SHA-256 sums, and a new build only replaces the old one if it looks complete.
 
 Dumps come out twice a week; the server checks every six hours and rebuilds once the copy is a
 week old. A build takes roughly an hour or two and needs room for two copies of the database.
