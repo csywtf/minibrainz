@@ -43,10 +43,15 @@ func main() {
 		if env("MINIBRAINZ_REFRESH", "on") == "on" {
 			go func() {
 				for {
+					// A failure (often the network not up yet at boot) is retried in
+					// 10 minutes, not at the next 6-hourly check.
+					wait := 6 * time.Hour
 					if err := f.run(); err != nil {
 						log.Printf("refresh failed, keeping the current copy: %v", err)
+						progress.end(err)
+						wait = 10 * time.Minute
 					}
-					time.Sleep(6 * time.Hour)
+					time.Sleep(wait)
 				}
 			}()
 		}
